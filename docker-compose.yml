@@ -1,0 +1,229 @@
+version: '3'
+
+networks:
+  frontend:
+    driver: ${NETWORKS_DRIVER}
+  backend:
+    driver: ${NETWORKS_DRIVER}
+
+volumes:
+  elasticsearch:
+    driver: ${VOLUMES_DRIVER}
+  mysql:
+    driver: ${VOLUMES_DRIVER}
+  redis:
+    driver: ${VOLUMES_DRIVER}
+  mongo:
+    driver: ${VOLUMES_DRIVER}
+    
+services:
+
+### PHP-FPM ##############################################
+    php-fpm:
+      build:
+        context: ./php-fpm
+        args:
+          - PHP_VERSION=${PHP_VERSION}
+      volumes:
+        - ./php-fpm/php72.ini:/usr/local/etc/php/php.ini
+        - ${APP_CODE_PATH_HOST}:${APP_CODE_PATH_CONTAINER}
+        - ${APP_PACKAGE_PATH}:${APP_PACKAGE_PATH_CONTAINER}
+      expose:
+        - "9000"
+      ports:
+        - "${WORKSPACE_SSH_PORT}:22"
+      extra_hosts:
+        - "dockerhost:${DOCKER_HOST_IP}"
+      environment:
+        - PHP_IDE_CONFIG=${PHP_IDE_CONFIG}
+      networks:
+        - backend
+
+
+### NGINX Server #########################################
+    nginx:
+      build:
+        context: ./nginx
+        args:
+          - PHP_UPSTREAM_CONTAINER=${NGINX_PHP_UPSTREAM_CONTAINER}
+          - PHP_UPSTREAM_PORT=${NGINX_PHP_UPSTREAM_PORT}
+      volumes:
+        - ${APP_CODE_PATH_HOST}:${APP_CODE_PATH_CONTAINER}
+        - ${APP_PACKAGE_PATH}:${APP_PACKAGE_PATH_CONTAINER}
+        - ${NGINX_HOST_LOG_PATH}:/var/log/nginx
+        - ${NGINX_SITES_PATH}:/etc/nginx/sites-available
+      ports:
+        - "${NGINX_HOST_HTTP_PORT}:80"
+        - "${NGINX_HOST_HTTPS_PORT}:443"
+      environment:
+        - TZ=${WORKSPACE_TIMEZONE}
+      depends_on:
+        - php-fpm
+      networks:
+        - frontend
+        - backend
+
+### tengine Server #########################################
+    tengine:
+      build:
+        context: ./tengine
+        args:
+          - PHP_UPSTREAM_CONTAINER=${TENGINE_PHP_UPSTREAM_CONTAINER}
+          - PHP_UPSTREAM_PORT=${TENGINE_PHP_UPSTREAM_PORT}
+      volumes:
+        - ${APP_CODE_PATH_HOST}:${APP_CODE_PATH_CONTAINER}
+        - ${TENGINE_SITES_PATH}:/usr/local/nginx/conf/conf.d
+      ports:
+        - "${NGINX_HOST_HTTP_PORT}:8080"
+        - "${NGINX_HOST_HTTPS_PORT}:4433"
+        - "9901:9901"
+      depends_on:
+        - php-fpm
+      networks:
+        - frontend
+        - backend
+
+### RabbitMQ #############################################
+    rabbitmq:
+      build: ./rabbitmq
+      ports:
+         - "${RABBITMQ_NODE_HOST_PORT}:5672"
+         - "${RABBITMQ_MANAGEMENT_HTTP_HOST_PORT}:15672"
+         - "${RABBITMQ_MANAGEMENT_HTTPS_HOST_PORT}:15671"
+      privileged: true
+      volumes:
+      - ${RABBITMQ_DATA_PATH}:/var/lib/rabbitmq
+      environment:
+         - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+         - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+      networks:
+         - backend
+
+### ElasticSearch ########################################
+    elasticsearch:
+      build: ./elasticsearch
+      volumes:
+        - ${DATA_PATH_HOST}/elasticsearch/data:/usr/share/elasticsearch/data
+      environment:
+        - cluster.name=elasticsearch-cluster
+        - bootstrap.memory_lock=true
+        - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+        - TZ=${WORKSPACE_TIMEZONE}
+      ulimits:
+        memlock:
+          soft: -1
+          hard: -1
+      ports:
+        - "${ELASTICSEARCH_HOST_HTTP_PORT}:9200"
+        - "${ELASTICSEARCH_HOST_TRANSPORT_PORT}:9300"
+      networks:
+        - frontend
+        - backend
+
+### Kibana ##############################################
+    kibana:
+      build: ./kibana
+      ports:
+        - "${KIBANA_HTTP_PORT}:5601"
+      depends_on:
+        - elasticsearch
+      networks:
+        - frontend
+        - backend
+
+### Redis ################################################
+    redis:
+      build: ./redis
+      volumes:
+        - ${DATA_PATH_HOST}/redis:/data
+      ports:
+        - "${REDIS_PORT}:6379"
+      networks:
+        - backend
+
+
+
+### MySQL ################################################
+    mysql:
+      build:
+        context: ./mysql
+        args:
+          - MYSQL_VERSION=${MYSQL_VERSION}
+      environment:
+        - MYSQL_DATABASE=${MYSQL_DATABASE}
+        - MYSQL_USER=${MYSQL_USER}
+        - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+        - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+        - TZ=${WORKSPACE_TIMEZONE}
+      volumes:
+        - ${DATA_PATH_HOST}/mysql:/var/lib/mysql
+        - ${MYSQL_ENTRYPOINT_INITDB}:/docker-entrypoint-initdb.d
+      ports:
+        - "${MYSQL_PORT}:3306"
+      networks:
+        - backend
+
+### MongoDB ##############################################
+    mongo:
+      build: ./mongo
+      ports:
+        - "${MONGODB_PORT}:27017"
+      volumes:
+        - ${DATA_PATH_HOST}/mongo:/data/db
+      networks:
+        - backend
+
+### MongoWebUI ################################################
+    mongo-webui:
+      build:
+        context: ./mongo-webui
+      environment:
+        - ROOT_URL=${MONGO_WEBUI_ROOT_URL}
+        - MONGO_URL=${MONGO_WEBUI_MONGO_URL}
+        - INSTALL_MONGO=${MONGO_WEBUI_INSTALL_MONGO}
+      volumes:
+        - ${DATA_PATH_HOST}/mongo-webui:/data/db
+      ports:
+        - "${MONGO_WEBUI_PORT}:3000"
+      networks:
+        - backend
+      depends_on:
+        - mongo
+
+### Yapi ################################################
+    yapi:
+      build:
+        context: ./yapi
+      volumes:
+        - ./yapi/config.json:/api/config.json
+      ports:
+        - "${YAPI_PORT}:3000"
+      depends_on:
+        - mongo
+      networks:
+        - backend
+
+### PHP Worker ############################################
+    php-worker:
+      build:
+        context: ./php-worker
+        args:
+          - PHP_VERSION=${PHP_VERSION}
+      logging:
+        driver: json-file
+        options:
+            max-file: "3"
+            max-size: "100m"
+      volumes:
+        - ${APP_CODE_PATH_HOST}:${APP_CODE_PATH_CONTAINER}
+        - ${APP_PACKAGE_PATH}:${APP_PACKAGE_PATH_CONTAINER}
+        - ./php-worker/supervisord.d:/etc/supervisor/conf.d
+      ports:
+        - "${PHP_SWOOLE_PORT}:9501"
+        - "6500:6500"
+        - "6501:6501"
+        - "9001:9001"
+      extra_hosts:
+        - "dockerhost:${DOCKER_HOST_IP}"
+      networks:
+        - backend
